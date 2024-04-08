@@ -1,257 +1,345 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h> // For strtok() and strcmp()
-#include <unistd.h> // For fork(), pid_t
-#include <sys/wait.h> // For waitpid() and associated macros
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include "wildcard.h"
+#include <fcntl.h>
+#include <unistd.h>
 
-char SHELL_NAME[50] = "myShell";
-int QUIT = 0;
+#define MYSH_TOK_BUFSIZE 64
+#define MYSH_TOK_DELIM " \t\r\n\a"
 
-// Function to read a line from command into the buffer
-char *readLine()
-{
-	char *line = (char *)malloc(sizeof(char) * 1024); // Dynamically Allocate Buffer
-	char c;
-	int pos = 0, bufsize = 1024;
-	if (!line) // Buffer Allocation Failed
-	{
-		printf("\nBuffer Allocation Error.");
-		exit(EXIT_FAILURE);
-	}
-	while(1)
-	{
-		c=getchar();
-		if (c == EOF || c == '\n') // If End of File or New line, replace with Null character
-		{
-			line[pos] = '\0';
-			return line;
-		}
-		else
-		{
-			line[pos] = c;
-		}
-		pos ++;
-		// If we have exceeded the buffer
-		if (pos >= bufsize)
-		{
-			bufsize += 1024;
-			line = realloc(line, sizeof(char) * bufsize);
-			if (!line) // Buffer Allocation Failed
-			{
-			printf("\nBuffer Allocation Error.");
-			exit(EXIT_FAILURE);
-			}
-		}
-	}
-
-}
-
-// Function to split a line into constituent commands
-char **splitLine(char *line)
-{
-	char **tokens = (char **)malloc(sizeof(char *) * 64);
-	char *token;
-	char delim[10] = " \t\n\r\a";
-	int pos = 0, bufsize = 64;
-	if (!tokens)
-	{
-		printf("\nBuffer Allocation Error.");
-		exit(EXIT_FAILURE);
-	}
-	token = strtok(line, delim);
-	while (token != NULL)
-	{
-		tokens[pos] = token;
-		pos ++;
-		if (pos >= bufsize)
-		{
-			bufsize += 64;
-			line = realloc(line, bufsize * sizeof(char *));
-			if (!line) // Buffer Allocation Failed
-			{
-			printf("\nBuffer Allocation Error.");
-			exit(EXIT_FAILURE);
-			}
-		}
-		token = strtok(NULL, delim);
-	}
-	tokens[pos] = NULL;
-	return tokens;
-}
-
-// Section Dealing with Built-in Commands
-
-// Function Declarations
+// Function Prototypes
+void loop(void);
+char *read_line(void);
+void execute_with_pipe(char **, char **);
+char **split_line(char *);
+int execute(char **);
+int myShell_num_builtins();
 int myShell_cd(char **args);
-int myShell_exit();
+int myShell_help(char **args);
+int myShell_exit(char **args);
 
-// Definitions
-char *builtin_cmd[] = {"cd", "exit"};
+char *builtin_str[] = {
+	"cd",
+	"help",
+	"exit"};
 
-int (*builtin_func[]) (char **) = {&myShell_cd, &myShell_exit}; // Array of function pointers for call from execShell
-
-int numBuiltin() // Function to return number of builtin commands
-{
-	return sizeof(builtin_cmd)/sizeof(char *);
-}
-
-// Builtin command definitions
-int myShell_cd(char **args)
-{
-	if (args[1] == NULL) 
-	{
-		printf("myShell: expected argument to \"cd\"\n");
-	} 
-	else 
-	{
-		if (chdir(args[1]) != 0) 
-		{
-			perror("myShell: ");
-		}
-	}
-	return 1;
-}
-
-int myShell_exit()
-{
-	QUIT = 1;
-	return 0;
-}
-
-// Function to create child process and run command
-int myShellLaunch(char **args)
-{
-	pid_t pid, wpid;
-	int status;
-	pid = fork();
-	if (pid == 0)
-	{
-		// The Child Process
-		if (execvp(args[0], args) == -1)
-		{
-			perror("myShell: ");
-		}
-	exit(EXIT_FAILURE);
-	}
-	else if (pid < 0)
-	{
-		//Forking Error
-		perror("myShell: ");
-	}
-	else
-	{
-		// The Parent Process
-	do 
-	{
-      wpid = waitpid(pid, &status, WUNTRACED);
-    } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-	}
-	return 1;
-}
-
-// Function to execute command from terminal
-int execShell(char **args)
-{
-	int ret;
-	if (args[0] == NULL)
-	{
-		// Empty command
-		return 1;
-	}
-	// Loop to check for builtin functions
-	for (int i=0; i< numBuiltin(); i++) // numBuiltin() returns the number of builtin functions
-	{
-		if(strcmp(args[0], builtin_cmd[i])==0) // Check if user function matches builtin function name
-			return (*builtin_func[i])(args); // Call respective builtin function with arguments
-	}
-	ret = myShellLaunch(args);
-	return ret;
-}
-
-// Read and Parse from Config File
-int readConfig()
-{
-	FILE *fptr;
-	char line[200];
-	char **args;
-	fptr = fopen("config", "r");
-	if (fptr == NULL)
-	{
-		printf("Unable to find config file.\n");
-		return 1;
-	}
-	else
-	{
-		while(fgets(line, sizeof(line), fptr) != NULL)
-		{
-			printf("\n%s", line);
-			args=splitLine(line);
-			if(strcmp(args[0], "export")==0)
-				strcpy(SHELL_NAME, args[1]);
-		}
-	}
-	free(args);
-	fclose(fptr);
-	return 1;
-}
-
-// When myShell is called Interactively
-int myShellInteract()
+void loop(void)
 {
 	char *line;
 	char **args;
-	while(QUIT == 0)
+	int status;
+
+	do
 	{
-		printf("%s> ", SHELL_NAME);
-		line=readLine();
-		args=splitLine(line);
-		execShell(args);
+		printf("> ");
+		line = read_line();
+		args = split_line(line);
+		status = execute(args);
+
 		free(line);
 		free(args);
+	} while (status);
+}
+char *read_line(void)
+{
+	char *line = NULL;
+	size_t bufsize = 0; // getline will allocate a buffer
+	getline(&line, &bufsize, stdin);
+	return line;
+}
+
+char **split_line(char *line)
+{
+	int bufsize = MYSH_TOK_BUFSIZE, position = 0;
+	char **tokens = malloc(bufsize * sizeof(char *));
+	char *token;
+
+	if (!tokens)
+	{
+		fprintf(stderr, "myShell: allocation error\n");
+		exit(EXIT_FAILURE);
+	}
+
+	token = strtok(line, MYSH_TOK_DELIM);
+	while (token != NULL)
+	{
+		tokens[position++] = token;
+
+		if (position >= bufsize)
+		{
+			bufsize += MYSH_TOK_BUFSIZE;
+			tokens = realloc(tokens, bufsize * sizeof(char *));
+			if (!tokens)
+			{
+				fprintf(stderr, "myShell: allocation error\n");
+				exit(EXIT_FAILURE);
+			}
+		}
+
+		token = strtok(NULL, MYSH_TOK_DELIM);
+	}
+	tokens[position] = NULL;
+	return tokens;
+}
+
+int myShell_cd(char **args)
+{
+	if (args[1] == NULL)
+	{
+		fprintf(stderr, "myShell: expected argument to \"cd\"\n");
+	}
+	else
+	{
+		if (chdir(args[1]) != 0)
+		{
+			perror("myShell");
+		}
 	}
 	return 1;
 }
 
-// When myShell is called with a Script as Argument
-int myShellScript(char filename[100])
+int myShell_help(char **args)
 {
-	printf("Received Script. Opening %s", filename);
-	FILE *fptr;
-	char line[200];
-	char **args;
-	fptr = fopen(filename, "r");
-	if (fptr == NULL)
+	printf("myShell, the simplest shell\n");
+	printf("Type program names and arguments, and hit enter.\n");
+	printf("The following are built in:\n");
+
+	for (int i = 0; i < myShell_num_builtins(); i++)
 	{
-		printf("\nUnable to open file.");
-		return 1;
+		printf("  %s\n", builtin_str[i]);
+	}
+
+	printf("Use the man command for information on other programs.\n");
+	return 1;
+}
+
+int myShell_exit(char **args)
+{
+	return 0;
+}
+
+int (*builtin_func[])(char **) = {
+	&myShell_cd,
+	&myShell_help,
+	&myShell_exit};
+int myShell_num_builtins()
+{
+	return sizeof(builtin_str) / sizeof(char *);
+}
+
+int execute(char **args)
+{
+
+	if (args[0] == NULL)
+	{
+		return 1; // Handle empty command
+	}
+
+	// Execute built-in commands
+	for (int i = 0; i < myShell_num_builtins(); i++)
+	{
+		if (strcmp(args[0], builtin_str[i]) == 0)
+		{
+			return (*builtin_func[i])(args);
+		}
+	}
+
+	// Wildcard expansion
+	char **expandedArgs = NULL;
+	int totalArgs = 0;
+	expand_wildcards(*args, &expandedArgs, &totalArgs);
+	char **execArgs = (expandedArgs != NULL) ? expandedArgs : args;
+	int totalExecArgs = 0;
+
+	// Allocate initial space for execArgs
+	execArgs = malloc(sizeof(char *));
+	execArgs[0] = NULL; // NULL-terminate the array
+
+	for (int i = 0; args[i] != NULL; i++)
+	{
+		if (strchr(args[i], '*') != NULL)
+		{ // Check if the argument contains a wildcard
+			char **expandedArgs = NULL;
+			int totalArgs = 0;
+			expand_wildcards(args[i], &expandedArgs, &totalArgs); // Expand the wildcard
+
+			// Append expandedArgs to execArgs
+			execArgs = realloc(execArgs, sizeof(char *) * (totalExecArgs + totalArgs + 1)); // +1 for NULL termination
+			for (int j = 0; j < totalArgs; j++)
+			{
+				execArgs[totalExecArgs++] = strdup(expandedArgs[j]); // Copy each expanded arg
+			}
+			free(expandedArgs); // Assuming expand_wildcards allocated expandedArgs
+		}
+		else
+		{
+			// No wildcard, just copy the argument directly
+			execArgs = realloc(execArgs, sizeof(char *) * (totalExecArgs + 2)); // +1 for new arg, +1 for NULL termination
+			execArgs[totalExecArgs++] = strdup(args[i]);
+		}
+		execArgs[totalExecArgs] = NULL; // NULL-terminate the array
+	}
+
+	// Prepare for execution
+
+	int fd = -1;
+	char *input_filename = NULL;
+	char *output_filename = NULL;
+
+	int redirect_out = 0, redirect_in = 0;
+
+	// Check for redirection
+	for (int i = 0; execArgs[i] != NULL; i++)
+	{
+		if (strcmp(execArgs[i], ">") == 0 && execArgs[i + 1] != NULL)
+		{
+			output_filename = execArgs[i + 1];
+			execArgs[i] = NULL; // Effectively removes ">" and the filename from execArgs
+		}
+		else if (strcmp(execArgs[i], "<") == 0 && execArgs[i + 1] != NULL)
+		{
+			input_filename = execArgs[i + 1];
+			execArgs[i] = NULL; // Removes "<" and the filename from execArgs
+		}
+	}
+
+	// Check for pipes and handle them
+	for (int i = 0; args[i] != NULL; i++)
+	{
+		if (strcmp(args[i], "|") == 0)
+		{
+			args[i] = NULL; // Split the command at the pipe symbol
+			char **cmd1 = args;
+			char **cmd2 = &args[i + 1];
+			execute_with_pipe(cmd1, cmd2);
+			return 1;
+		}
+	}
+	printf("Executing command: %s\n", execArgs[0]);
+	for (int i = 0; execArgs[i] != NULL; i++)
+	{
+		printf("Argument %d: %s\n", i, execArgs[i]);
+	}
+
+	pid_t pid = fork();
+	if (pid == 0)
+	{ // Child process
+		// Input redirection
+		if (input_filename)
+		{
+			int fd_in = open(input_filename, O_RDONLY);
+			if (fd_in < 0)
+			{
+				perror("Failed to open input file");
+				exit(EXIT_FAILURE);
+			}
+			dup2(fd_in, STDIN_FILENO);
+			close(fd_in);
+		}
+
+		// Output redirection
+		if (output_filename)
+		{
+			int fd_out = open(output_filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			if (fd_out < 0)
+			{
+				perror("Failed to open output file");
+				exit(EXIT_FAILURE);
+			}
+			dup2(fd_out, STDOUT_FILENO);
+			close(fd_out);
+		}
+
+		// Execute the command
+		if (execvp(execArgs[0], execArgs) == -1)
+		{
+			perror("execvp");
+			exit(EXIT_FAILURE);
+		}
+	}
+	else if (pid < 0)
+	{
+		perror("Failed to fork");
+		return -1; // Indicate fork failure
 	}
 	else
 	{
-		printf("\nFile Opened. Parsing. Parsed commands displayed first.");
-		while(fgets(line, sizeof(line), fptr)!= NULL)
+		// Parent process waits for child
+		int status;
+		waitpid(pid, &status, 0);
+	}
+
+	// Cleanup
+	if (expandedArgs != NULL)
+	{
+		for (int i = 0; i < totalArgs; i++)
 		{
-			printf("\n%s", line);
-			args=splitLine(line);
-			execShell(args);
+			free(expandedArgs[i]);
+		}
+		free(expandedArgs);
+	}
+	return 1; // Success
+}
+
+void execute_with_pipe(char **cmd1, char **cmd2)
+{
+	int pipefd[2];
+	pid_t pid1, pid2;
+
+	if (pipe(pipefd) < 0)
+	{
+		perror("pipe");
+		exit(EXIT_FAILURE);
+	}
+
+	pid1 = fork();
+	if (pid1 == 0)
+	{
+		// First child - writes to the pipe
+		close(pipefd[0]);				// Close the read end
+		dup2(pipefd[1], STDOUT_FILENO); // Replace stdout with the write end of the pipe
+		close(pipefd[1]);				// Close the write end after dup2
+
+		if (execvp(cmd1[0], cmd1) < 0)
+		{
+			perror("execvp");
+			exit(EXIT_FAILURE);
 		}
 	}
-	free(args);
-	fclose(fptr);
-	return 1;
+
+	pid2 = fork();
+	if (pid2 == 0)
+	{
+		// Second child - reads from the pipe
+		close(pipefd[1]);			   // Close the write end
+		dup2(pipefd[0], STDIN_FILENO); // Replace stdin with the read end of the pipe
+		close(pipefd[0]);			   // Close the read end after dup2
+
+		if (execvp(cmd2[0], cmd2) < 0)
+		{
+			perror("execvp");
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	// Parent closes both ends of the pipe and waits for children
+	close(pipefd[0]);
+	close(pipefd[1]);
+	waitpid(pid1, NULL, 0);
+	waitpid(pid2, NULL, 0);
 }
 
 int main(int argc, char **argv)
 {
-	// Read from myShell Configuration Files
-	readConfig();
-	// Parsing commands Interactive mode or Script Mode
-	if (argc == 1)
-		myShellInteract();
-	else if (argc == 2)
-		myShellScript(argv[1]);
-	else
-		printf("\nInvalid Number of Arguments");
+	printf("Welcome to my shell!\n");
 
-	// Exit the Shell
+	// Run command loop
+	loop();
+
+	printf("Exiting my shell.\n");
+
 	return EXIT_SUCCESS;
 }

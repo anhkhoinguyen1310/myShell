@@ -1,5 +1,7 @@
-all:
-	chmod a+x myShell.c
-	gcc -o myShell myShell.c
+all: myShell
+
+myShell: myShell.c wildcard.c
+	gcc -o myShell myShell.c wildcard.c
+
 clean:
-	rm *o myShell
+	rm -f myShell
