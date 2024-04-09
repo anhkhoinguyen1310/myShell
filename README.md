@@ -31,7 +31,7 @@ Redirection attempts to write the list of items into the testfile by using echo 
 - A single command can redirect both standard input and standard output.
 	- grep Apple < test1.txt > test2.txt
 
-#**Pipes**
+# **Pipes**
 ---
 To demonstrate the functionality of pipes, we utilized the command to sort the contents of the "test.txt" file in reverse alphabetical order. 
 
